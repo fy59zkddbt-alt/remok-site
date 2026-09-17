@@ -223,6 +223,7 @@ function bridgeDebug(message) {
   if (window.REMOK_DEBUG_LEADS === true) console.debug('Tilda bridge: ' + message);
 }
 function showLeadStatus(form, message) {
+  if (message.startsWith(bridgeErrorText)) bridgeDebug('error');
   const status = form.querySelector('.form-status');
   status.textContent = message;
   status.hidden = false;
@@ -234,12 +235,11 @@ function findTildaTarget() {
   const result = fields[0];
   const form = result.form;
   if (!form.matches('.t-form.js-form-proccess')) return null;
-  const inputs = [...form.querySelectorAll('input[name]')]
-    .filter(input => input.form === form && !input.disabled && input.type !== 'hidden');
-  // Семантические атрибуты опубликованной Tilda: autocomplete=name, data-tilda-rule=name, type=tel.
-  const names = inputs.filter(input => input.type === 'text' &&
-    (input.autocomplete === 'name' || input.dataset.tildaRule === 'name'));
-  const phones = inputs.filter(input => input.type === 'tel' || input.autocomplete === 'tel');
+  // Фактические name опубликованной формы; поиск строго внутри неё, без зависимости от type/mask.
+  const names = [...form.querySelectorAll('input[name="Name"]')]
+    .filter(input => input.form === form && !input.disabled);
+  const phones = [...form.querySelectorAll('input[name="phone"]')]
+    .filter(input => input.form === form && !input.disabled);
   const buttons = [...form.querySelectorAll('button[type="submit"], input[type="submit"]')]
     .filter(button => button.form === form && !button.disabled);
   if (names.length !== 1 || phones.length !== 1 || buttons.length !== 1) return null;
@@ -280,7 +280,7 @@ function submitLead(formData, sourceForm) {
     showLeadStatus(sourceForm, bridgeErrorText);
     return;
   }
-  bridgeDebug('form found');
+  bridgeDebug('technical form found');
   bridgeDebug('name field found');
   bridgeDebug('phone field found');
   bridgeDebug('calculator_result found');
@@ -289,6 +289,7 @@ function submitLead(formData, sourceForm) {
     setTildaValue(target.name, data.name || '');
     setTildaValue(target.phone, data.phone);
     setTildaValue(target.result, formatLeadMessage(data));
+    bridgeDebug('fields populated');
   } catch {
     console.warn('Tilda bridge: field preparation failed; submission stopped');
     showLeadStatus(sourceForm, bridgeErrorText);
@@ -339,6 +340,7 @@ function submitLead(formData, sourceForm) {
     activeTildaSubmission = null;
     buttons.forEach((button, index) => { button.disabled = disabledBefore[index]; });
     sourceForm.removeAttribute('aria-busy');
+    if (success) bridgeDebug('success');
     showLeadStatus(sourceForm, success
       ? 'Заявка отправлена. Мы свяжемся с вами.'
       : bridgeErrorText);
