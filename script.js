@@ -4,7 +4,7 @@
 const CONTACTS = {
   phoneDisplay: '+7 905 955-50-06',
   phone: '+79059555006',
-  whatsapp: "https://wa.me/79059555006?text=%D0%97%D0%B4%D1%80%D0%B0%D0%B2%D1%81%D1%82%D0%B2%D1%83%D0%B9%D1%82%D0%B5%2C%20%D1%85%D0%BE%D1%87%D1%83%20%D1%80%D0%B0%D1%81%D1%81%D1%87%D0%B8%D1%82%D0%B0%D1%82%D1%8C%20%D1%81%D1%82%D0%BE%D0%B8%D0%BC%D0%BE%D1%81%D1%82%D1%8C%20%D0%BE%D1%81%D1%82%D0%B5%D0%BA%D0%BB%D0%B5%D0%BD%D0%B8%D1%8F%20%D0%B8%D0%BB%D0%B8%20%D0%BE%D1%82%D0%B4%D0%B5%D0%BB%D0%BA%D0%B8",
+  max: "https://max.ru/u/f9LHodD0cOJ4aYRBqU1mQyNp67MUEM86ByT9lwaMOyiDO4nb9DzO4GPVeDw",
   telegram: "https://t.me/LPzxcvb"
 };
 
@@ -137,6 +137,33 @@ let calculatorType = 'glazing';
 let currentCalculation = null;
 // Заявка хранится только в памяти страницы до перезагрузки. Сетевых запросов нет.
 const prototypeState = { lastRequest: null };
+const leadFields = ['form_source', 'page_url', 'calculator_type', 'calculator_result', 'calculator_parameters', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
+const utmKeys = leadFields.filter(key => key.startsWith('utm_'));
+const query = new URLSearchParams(location.search);
+const utm = Object.fromEntries(utmKeys.map(key => [key, query.get(key) || '']));
+// Снимок параметров текущей страницы; без cookies и переноса старой кампании.
+function syncLeadFields() {
+  document.querySelectorAll('.prototype-form').forEach(form => {
+    const calculation = currentCalculation;
+    const source = form === calculator ? 'calculator_' + calculatorType : 'final_cta';
+    const fields = {
+      ...utm, form_source: source, page_url: location.href,
+      calculator_type: calculation?.type || '',
+      calculator_parameters: calculation ? JSON.stringify(calculation.parameters) : '',
+      calculator_result: calculation ? JSON.stringify({
+        price: calculation.price, currency: 'RUB',
+        discount: calculation.discount, installment_months: calculation.installment
+      }) : ''
+    };
+    leadFields.forEach(key => { form.elements.namedItem(key).value = fields[key]; });
+  });
+}
+// TILDA FORM INTEGRATION POINT
+// Нет сетевого запроса: заменить только эту функцию после согласования интеграции.
+function submitLead(formData) {
+  prototypeState.lastRequest = Object.fromEntries(formData.entries());
+  return { sent: false };
+}
 
 document.querySelector('#glazing-profiles').innerHTML = Object.entries(PRICING.glazing).map(([key, profile], index) =>
   `<label><input type="radio" name="profile" value="${key}" ${index === 0 ? 'checked' : ''}><span><strong>${profile.name}</strong><small>${profile.label} вариант</small></span></label>`
@@ -173,14 +200,18 @@ function updateCalculation() {
   document.querySelectorAll('[data-finish-price]').forEach(output => { output.textContent = '—'; });
   document.querySelector('#finish-summary').textContent = 'Введите ширину, высоту и глубину откоса — покажем стоимость вариантов.';
   calculator.querySelector('.form-status').hidden = true;
-  if (!valid) return;
+  if (!valid) { syncLeadFields(); return; }
 
   const width = widthInput.valueAsNumber;
   const height = heightInput.valueAsNumber;
   if (calculatorType === 'glazing') {
     const profile = calculator.elements.namedItem('profile').value;
     const result = calculateGlazing(width, height, profile);
-    currentCalculation = { calculatorType, width, height, profile, price: result.price };
+    const available = getVolumeCondition(result.area);
+    currentCalculation = {
+      type: 'glazing', parameters: { width_mm: width, height_mm: height, area_m2: result.area, profile: PRICING.glazing[profile].name },
+      price: result.price, discount: available?.discount || '', installment: available?.months || ''
+    };
     document.querySelector('#glazing-price').textContent = formatPrice(result.price);
     document.querySelector('#area-summary').textContent = `Площадь ${areaFormat.format(result.area)} м²`;
     const condition = getVolumeCondition(result.area);
@@ -194,15 +225,20 @@ function updateCalculation() {
     if (!Object.values(prices).every(Number.isFinite)) {
       error.hidden = false;
       error.textContent = 'Проверьте глубину откоса: значение слишком велико для расчёта.';
+      syncLeadFields();
       return;
     }
     const finishingVariant = calculator.elements.namedItem('finish').value;
-    currentCalculation = { calculatorType, width, height, depth, finishingVariant, price: prices[finishingVariant] };
+    currentCalculation = {
+      type: 'finishing', parameters: { width_mm: width, height_mm: height, depth_mm: depth, variant: PRICING.finishing.variants[finishingVariant].name },
+      price: prices[finishingVariant], discount: '', installment: ''
+    };
     document.querySelectorAll('[data-finish-price]').forEach(output => {
       output.textContent = `≈ ${formatPrice(prices[output.dataset.finishPrice])}`;
     });
     document.querySelector('#finish-summary').textContent = `Выбрано: ${PRICING.finishing.variants[finishingVariant].name}. Ориентировочно ${formatPrice(prices[finishingVariant])}.`;
   }
+  syncLeadFields();
 }
 
 const tabs = [...document.querySelectorAll('[role="tab"]')];
@@ -259,13 +295,10 @@ document.querySelectorAll('.prototype-form').forEach(form => {
   form.addEventListener('submit', event => {
     event.preventDefault();
     if (!validatePhone()) { phone.reportValidity(); return; }
-    if (form === calculator) {
-      updateCalculation();
-      if (!currentCalculation) { form.reportValidity(); return; }
-      prototypeState.lastRequest = { ...currentCalculation, phone: phone.value.trim() };
-    } else {
-      prototypeState.lastRequest = { calculatorType: null, phone: phone.value.trim() };
-    }
+    if (!form.reportValidity()) return;
+    if (form === calculator && !currentCalculation) return;
+    syncLeadFields();
+    submitLead(new FormData(form));
     const status = form.querySelector('.form-status');
     status.textContent = 'Это прототип: данные не отправлены. Для связи воспользуйтесь телефоном или мессенджером.';
     status.hidden = false;
