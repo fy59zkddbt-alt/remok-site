@@ -162,6 +162,11 @@ function syncLeadFields() {
 // Нет сетевого запроса: заменить только эту функцию после согласования интеграции.
 function submitLead(formData) {
   prototypeState.lastRequest = Object.fromEntries(formData.entries());
+  // Только локальная разработка, явное включение из DevTools. На production лог отключён.
+  const localDebug = location.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  if (localDebug && window.REMOK_DEBUG_LEADS === true) {
+    console.debug('[REMOK lead preview — not sent]', { ...prototypeState.lastRequest });
+  }
   return { sent: false };
 }
 
