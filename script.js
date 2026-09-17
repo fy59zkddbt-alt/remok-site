@@ -135,8 +135,7 @@ if (document.querySelector("#calculator-form")) {
 const calculator = document.querySelector('#calculator-form');
 let calculatorType = 'glazing';
 let currentCalculation = null;
-// Заявка хранится только в памяти страницы до перезагрузки. Сетевых запросов нет.
-const prototypeState = { lastRequest: null };
+let activeTildaSubmission = null;
 const leadFields = ['form_source', 'page_url', 'calculator_type', 'calculator_result', 'calculator_parameters', 'utm_source', 'utm_medium', 'utm_campaign', 'utm_content', 'utm_term'];
 const utmKeys = leadFields.filter(key => key.startsWith('utm_'));
 const query = new URLSearchParams(location.search);
@@ -160,14 +159,10 @@ function syncLeadFields() {
   syncCalculationToTilda();
 }
 
-// POC: только видимое поле штатной формы, не hidden JSON форм REMOK.
-function syncCalculationToTilda() {
-  const field = [...document.querySelectorAll('textarea[name="calculator_result"]')]
-    .find(element => element.closest('form') && !element.closest('.prototype-form'));
-  if (!field) return false;
+function formatCalculationText(calculation) {
   let text = '';
-  if (currentCalculation) {
-    const { type, parameters: p, price, discount, installment } = currentCalculation;
+  if (calculation) {
+    const { type, parameters: p, price, discount, installment } = calculation;
     const lines = type === 'glazing'
       ? [
           'Тип: Остекление',
@@ -191,11 +186,15 @@ function syncCalculationToTilda() {
     }
     text = lines.join('\n');
   }
-  if (field.value !== text) {
-    field.value = text;
-    field.dispatchEvent(new Event('input', { bubbles: true }));
-    field.dispatchEvent(new Event('change', { bubbles: true }));
-  }
+  return text;
+}
+
+// POC сохраняется, но не перезаписывает снимок заявки во время отправки.
+function syncCalculationToTilda() {
+  const fields = [...document.querySelectorAll('textarea[name="calculator_result"]')].filter(element => element.form && !element.closest('.prototype-form'));
+  if (fields.length !== 1) return false;
+  if (activeTildaSubmission) return true;
+  setTildaValue(fields[0], formatCalculationText(currentCalculation));
   return true;
 }
 
@@ -218,15 +217,168 @@ if (document.readyState === 'loading') {
 }
 
 // TILDA FORM INTEGRATION POINT
-// Нет сетевого запроса: заменить только эту функцию после согласования интеграции.
-function submitLead(formData) {
-  prototypeState.lastRequest = Object.fromEntries(formData.entries());
-  // Только локальная разработка, явное включение из DevTools. На production лог отключён.
-  const localDebug = location.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
-  if (localDebug && window.REMOK_DEBUG_LEADS === true) {
-    console.debug('[REMOK lead preview — not sent]', { ...prototypeState.lastRequest });
+// Только штатная кнопка Tilda; никаких собственных запросов или endpoint.
+const bridgeErrorText = 'Не удалось отправить заявку. Позвоните нам или напишите в Telegram/MAX.';
+function bridgeDebug(message) {
+  if (window.REMOK_DEBUG_LEADS === true) console.debug('Tilda bridge: ' + message);
+}
+function showLeadStatus(form, message) {
+  const status = form.querySelector('.form-status');
+  status.textContent = message;
+  status.hidden = false;
+}
+function findTildaTarget() {
+  const fields = [...document.querySelectorAll('textarea[name="calculator_result"]')]
+    .filter(field => field.form && !field.closest('.prototype-form'));
+  if (fields.length !== 1) return null;
+  const result = fields[0];
+  const form = result.form;
+  if (!form.matches('.t-form.js-form-proccess')) return null;
+  const inputs = [...form.querySelectorAll('input[name]')]
+    .filter(input => input.form === form && !input.disabled && input.type !== 'hidden');
+  // Семантические атрибуты опубликованной Tilda: autocomplete=name, data-tilda-rule=name, type=tel.
+  const names = inputs.filter(input => input.type === 'text' &&
+    (input.autocomplete === 'name' || input.dataset.tildaRule === 'name'));
+  const phones = inputs.filter(input => input.type === 'tel' || input.autocomplete === 'tel');
+  const buttons = [...form.querySelectorAll('button[type="submit"], input[type="submit"]')]
+    .filter(button => button.form === form && !button.disabled);
+  if (names.length !== 1 || phones.length !== 1 || buttons.length !== 1) return null;
+  return { form, result, name: names[0], phone: phones[0], button: buttons[0] };
+}
+function setTildaValue(field, value) {
+  if (field.value === value) return;
+  field.value = value;
+  field.dispatchEvent(new Event('input', { bubbles: true }));
+  field.dispatchEvent(new Event('change', { bubbles: true }));
+}
+function formatLeadMessage(data) {
+  let calculation = null;
+  if (data.calculator_type) {
+    const result = JSON.parse(data.calculator_result);
+    calculation = {
+      type: data.calculator_type, parameters: JSON.parse(data.calculator_parameters),
+      price: result.price, discount: result.discount, installment: result.installment_months
+    };
   }
-  return { sent: false };
+  const lines = [
+    'Источник формы: ' + (data.form_source === 'final_cta' ? 'Финальный CTA' : 'Калькулятор'),
+    'Имя: ' + (data.name || ''), 'Телефон: ' + data.phone, '',
+    calculation ? formatCalculationText(calculation) : 'Расчёт: не выполнялся',
+    '', 'Страница: ' + data.page_url
+  ];
+  utmKeys.forEach(key => { if (data[key]) lines.push('UTM ' + key.slice(4) + ': ' + data[key]); });
+  return lines.join('\n');
+}
+function submitLead(formData, sourceForm) {
+  if (activeTildaSubmission) return;
+  if (!sourceForm?.matches('.prototype-form') || !sourceForm.reportValidity()) return;
+  const data = Object.fromEntries(formData.entries());
+  if (sourceForm === calculator && !data.calculator_type) return;
+  const target = findTildaTarget();
+  if (!target) {
+    console.warn('Tilda bridge: reliable form/name/phone/result/submit not found; submission stopped');
+    showLeadStatus(sourceForm, bridgeErrorText);
+    return;
+  }
+  bridgeDebug('form found');
+  bridgeDebug('name field found');
+  bridgeDebug('phone field found');
+  bridgeDebug('calculator_result found');
+
+  try {
+    setTildaValue(target.name, data.name || '');
+    setTildaValue(target.phone, data.phone);
+    setTildaValue(target.result, formatLeadMessage(data));
+  } catch {
+    console.warn('Tilda bridge: field preparation failed; submission stopped');
+    showLeadStatus(sourceForm, bridgeErrorText);
+    return;
+  }
+  // Маска не должна молча обрезать/изменять номер.
+  if (target.phone.value.replace(/\D/g, '') !== data.phone.replace(/\D/g, '')) {
+    console.warn('Tilda bridge: phone mask changed digits; submission stopped');
+    showLeadStatus(sourceForm, bridgeErrorText);
+    target.phone.focus();
+    return;
+  }
+  // Не отключаем обязательные поля или согласия Tilda, не подставляем фиктивный Email.
+  const missing = [...target.form.elements].find(field =>
+    !field.disabled && field.type !== 'hidden' &&
+    (field.required || field.getAttribute('data-tilda-req') === '1') &&
+    (['checkbox', 'radio'].includes(field.type) ? !field.checked : !String(field.value || '').trim()));
+  if (missing || !target.form.checkValidity()) {
+    console.warn('Tilda bridge: native required field/validation prevents submission');
+    showLeadStatus(sourceForm, bridgeErrorText + ' Проверьте обязательные поля в форме Tilda ниже.');
+    target.form.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    if (missing) missing.focus();
+    else target.form.reportValidity();
+    return;
+  }
+
+  // Один технический канал для обеих форм: блокируем и повтор, и параллельную заявку.
+  const buttons = [...document.querySelectorAll('.prototype-form button[type="submit"]')];
+  const disabledBefore = buttons.map(button => button.disabled);
+  buttons.forEach(button => { button.disabled = true; });
+  sourceForm.setAttribute('aria-busy', 'true');
+  showLeadStatus(sourceForm, 'Отправляем…');
+  const submission = { sourceForm, target };
+  activeTildaSubmission = submission;
+  let observer;
+  let timeout;
+  function preventFallback(event) {
+    // Не допускаем обычный HTML POST/перезагрузку, если скрипт Tilda ещё не инициализирован.
+    // Обработчики Tilda продолжают получать submit (без stopPropagation).
+    event.preventDefault();
+  }
+  function finish(success) {
+    if (activeTildaSubmission !== submission) return;
+    clearTimeout(timeout);
+    observer.disconnect();
+    target.form.removeEventListener('tildaform:aftersuccess', onSuccess);
+    target.form.removeEventListener('submit', preventFallback);
+    activeTildaSubmission = null;
+    buttons.forEach((button, index) => { button.disabled = disabledBefore[index]; });
+    sourceForm.removeAttribute('aria-busy');
+    showLeadStatus(sourceForm, success
+      ? 'Заявка отправлена. Мы свяжемся с вами.'
+      : bridgeErrorText);
+  }
+  // Документированное событие: https://help.tilda.cc/tips/javascript
+  function onSuccess(event) {
+    if (event.target === target.form) finish(true);
+  }
+  const errorSelector = '.js-errorbox-all, .t-input-error';
+  const visibleError = element => element.getClientRects().length > 0 &&
+    getComputedStyle(element).visibility !== 'hidden' && Boolean(element.textContent.trim());
+  const errorsBefore = new Map([...target.form.querySelectorAll(errorSelector)]
+    .map(element => [element, visibleError(element)]));
+  observer = new MutationObserver(records => {
+    for (const element of target.form.querySelectorAll(errorSelector)) {
+      const visible = visibleError(element);
+      // Учитываем новый показ ошибки, а не старое сообщение предыдущей попытки.
+      const changed = records.some(record =>
+        (record.target === element || element.contains(record.target)) &&
+        (record.type === 'childList' || record.type === 'characterData' ||
+         (record.attributeName === 'style' && /display\s*:\s*none/.test(record.oldValue || ''))));
+      if (visible && (!errorsBefore.get(element) || changed)) { finish(false); return; }
+      errorsBefore.set(element, visible);
+    }
+  });
+  target.form.addEventListener('tildaform:aftersuccess', onSuccess);
+  target.form.addEventListener('submit', preventFallback);
+  observer.observe(target.form, { subtree: true, attributes: true, attributeOldValue: true, childList: true, characterData: true });
+  // Неизвестный итог не равен ошибке: не разрешаем повтор, пока Tilda ещё может доставить заявку.
+  timeout = setTimeout(() => {
+    if (activeTildaSubmission === submission) {
+      showLeadStatus(sourceForm, 'Подтверждение отправки пока не получено. Не отправляйте повторно; проверьте форму Tilda ниже или свяжитесь с нами.');
+    }
+  }, 45000);
+  try {
+    bridgeDebug('submit triggered');
+    target.button.click();
+  } catch {
+    finish(false);
+  }
 }
 
 document.querySelector('#glazing-profiles').innerHTML = Object.entries(PRICING.glazing).map(([key, profile], index) =>
@@ -263,7 +415,7 @@ function updateCalculation() {
   document.querySelector('#area-summary').textContent = 'Введите ширину и высоту окна';
   document.querySelectorAll('[data-finish-price]').forEach(output => { output.textContent = '—'; });
   document.querySelector('#finish-summary').textContent = 'Введите ширину, высоту и глубину откоса — покажем стоимость вариантов.';
-  calculator.querySelector('.form-status').hidden = true;
+  if (!activeTildaSubmission) calculator.querySelector('.form-status').hidden = true;
   if (!valid) { syncLeadFields(); return; }
 
   const width = widthInput.valueAsNumber;
@@ -343,7 +495,7 @@ calculator.addEventListener('input', event => {
 });
 updateCalculation();
 
-// Формы прототипа: валидация, подготовка объекта заявки, без отправки и хранения на диске.
+// Формы REMOK: валидация и единый штатный мост Tilda.
 document.querySelectorAll('.prototype-form').forEach(form => {
   const phone = form.elements.namedItem('phone');
   function validatePhone() {
@@ -354,18 +506,16 @@ document.querySelectorAll('.prototype-form').forEach(form => {
   }
   phone.addEventListener('input', () => {
     validatePhone();
-    form.querySelector('.form-status').hidden = true;
+    if (!activeTildaSubmission) form.querySelector('.form-status').hidden = true;
   });
   form.addEventListener('submit', event => {
     event.preventDefault();
+    if (activeTildaSubmission) return;
     if (!validatePhone()) { phone.reportValidity(); return; }
     if (!form.reportValidity()) return;
     if (form === calculator && !currentCalculation) return;
     syncLeadFields();
-    submitLead(new FormData(form));
-    const status = form.querySelector('.form-status');
-    status.textContent = 'Это прототип: данные не отправлены. Для связи воспользуйтесь телефоном или мессенджером.';
-    status.hidden = false;
+    submitLead(new FormData(form), form);
   });
 });
 
