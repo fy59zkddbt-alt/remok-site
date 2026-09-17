@@ -157,7 +157,66 @@ function syncLeadFields() {
     };
     leadFields.forEach(key => { form.elements.namedItem(key).value = fields[key]; });
   });
+  syncCalculationToTilda();
 }
+
+// POC: только видимое поле штатной формы, не hidden JSON форм REMOK.
+function syncCalculationToTilda() {
+  const field = [...document.querySelectorAll('textarea[name="calculator_result"]')]
+    .find(element => element.closest('form') && !element.closest('.prototype-form'));
+  if (!field) return false;
+  let text = '';
+  if (currentCalculation) {
+    const { type, parameters: p, price, discount, installment } = currentCalculation;
+    const lines = type === 'glazing'
+      ? [
+          'Тип: Остекление',
+          'Размер: ' + p.width_mm + ' × ' + p.height_mm + ' мм',
+          'Площадь: ' + areaFormat.format(p.area_m2) + ' м²',
+          'Профиль: ' + p.profile,
+          'Предварительная стоимость: ' + formatPrice(price)
+        ]
+      : [
+          'Тип: Отделка',
+          'Размер окна: ' + p.width_mm + ' × ' + p.height_mm + ' мм',
+          'Глубина откоса: ' + p.depth_mm + ' мм',
+          'Вариант: ' + p.variant,
+          'Предварительная стоимость: ' + formatPrice(price)
+        ];
+    if (type === 'glazing' && (discount || installment)) {
+      const conditions = [];
+      if (discount) conditions.push('скидка ' + discount);
+      if (installment) conditions.push('рассрочка до ' + installment + ' мес.');
+      lines.push('Условия: ' + conditions.join(' или '));
+    }
+    text = lines.join('\n');
+  }
+  if (field.value !== text) {
+    field.value = text;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+  }
+  return true;
+}
+
+// До 20 попыток за 10 секунд; последующие расчёты тоже выполняют поиск.
+function waitForTildaCalculationField(attempt = 0) {
+  const found = syncCalculationToTilda();
+  if (!found && attempt < 19) {
+    setTimeout(() => waitForTildaCalculationField(attempt + 1), 500);
+    return;
+  }
+  const localDebug = location.protocol === 'file:' || ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  if (localDebug && window.REMOK_DEBUG_LEADS === true) {
+    console.debug(found ? 'Tilda calculator_result field found' : 'Tilda calculator_result field not found');
+  }
+}
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => waitForTildaCalculationField(), { once: true });
+} else {
+  waitForTildaCalculationField();
+}
+
 // TILDA FORM INTEGRATION POINT
 // Нет сетевого запроса: заменить только эту функцию после согласования интеграции.
 function submitLead(formData) {
