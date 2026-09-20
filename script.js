@@ -190,9 +190,16 @@ function formatCalculationText(calculation) {
 }
 
 // POC сохраняется, но не перезаписывает снимок заявки во время отправки.
+function hideTildaBridgeBlock(field) {
+  const form = field.closest('form.t-form.js-form-proccess');
+  const block = form?.closest('.t-rec');
+  if (!block || block.querySelector('.prototype-form')) return;
+  block.classList.add('remok-tilda-bridge-hidden');
+}
 function syncCalculationToTilda() {
   const fields = [...document.querySelectorAll('textarea[name="calculator_result"]')].filter(element => element.form && !element.closest('.prototype-form'));
   if (fields.length !== 1) return false;
+  hideTildaBridgeBlock(fields[0]);
   if (activeTildaSubmission) return true;
   setTildaValue(fields[0], formatCalculationText(currentCalculation));
   return true;
@@ -234,6 +241,7 @@ function findTildaTarget() {
   const result = fields.length === 1 ? fields[0] : null;
   const form = result?.closest('form');
   const technical = Boolean(form?.matches('.t-form.js-form-proccess'));
+  if (technical) hideTildaBridgeBlock(result);
   const names = technical ? [...form.querySelectorAll('input[name="Name"]')]
     .filter(input => input.form === form && !input.disabled) : [];
   const phones = technical ? [...form.querySelectorAll('input[name="phone"]')]

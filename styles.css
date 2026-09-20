@@ -312,3 +312,20 @@ input[aria-invalid=true] { border-color: #8b352c; }
 
 .prototype-form .field + .field { margin-top: 14px; }
 
+/* Keep the published Tilda bridge active while removing its block from view and flow. */
+.remok-tilda-bridge-hidden {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  overflow: hidden !important;
+  clip: rect(0 0 0 0) !important;
+  clip-path: inset(50%) !important;
+  white-space: nowrap !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
