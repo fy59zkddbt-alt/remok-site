@@ -230,20 +230,37 @@ function showLeadStatus(form, message) {
 }
 function findTildaTarget() {
   const fields = [...document.querySelectorAll('textarea[name="calculator_result"]')]
-    .filter(field => field.form && !field.closest('.prototype-form'));
-  if (fields.length !== 1) return null;
-  const result = fields[0];
-  const form = result.form;
-  if (!form.matches('.t-form.js-form-proccess')) return null;
-  // Фактические name опубликованной формы; поиск строго внутри неё, без зависимости от type/mask.
-  const names = [...form.querySelectorAll('input[name="Name"]')]
-    .filter(input => input.form === form && !input.disabled);
-  const phones = [...form.querySelectorAll('input[name="phone"]')]
-    .filter(input => input.form === form && !input.disabled);
-  const buttons = [...form.querySelectorAll('button[type="submit"], input[type="submit"]')]
-    .filter(button => button.form === form && !button.disabled);
-  if (names.length !== 1 || phones.length !== 1 || buttons.length !== 1) return null;
+    .filter(field => field.closest('form') && !field.closest('.prototype-form'));
+  const result = fields.length === 1 ? fields[0] : null;
+  const form = result?.closest('form');
+  const technical = Boolean(form?.matches('.t-form.js-form-proccess'));
+  const names = technical ? [...form.querySelectorAll('input[name="Name"]')]
+    .filter(input => input.form === form && !input.disabled) : [];
+  const phones = technical ? [...form.querySelectorAll('input[name="phone"]')]
+    .filter(input => input.form === form && !input.disabled) : [];
+  const buttons = technical ? [...form.querySelectorAll('button[type="submit"], input[type="submit"]')]
+    .filter(button => button.form === form && !button.disabled) : [];
+  bridgeDebug('Tilda form found = ' + technical);
+  bridgeDebug('Tilda Name found = ' + (names.length === 1));
+  bridgeDebug('Tilda phone found = ' + (phones.length === 1));
+  bridgeDebug('Tilda calculator_result found = ' + Boolean(result));
+  if (!technical || names.length !== 1 || phones.length !== 1 || buttons.length !== 1) {
+    bridgeDebug('aborted: technical form fields or submit missing/ambiguous');
+    return null;
+  }
   return { form, result, name: names[0], phone: phones[0], button: buttons[0] };
+}
+// Резервный native setter только если обычное присвоение не сохранило строку.
+// POC и общий setter textarea не изменяются.
+function setTildaLeadInput(field, value) {
+  const text = String(value || '');
+  setTildaValue(field, text);
+  if (field.value !== text) {
+    const prototype = field.ownerDocument.defaultView.HTMLInputElement.prototype;
+    Object.getOwnPropertyDescriptor(prototype, 'value').set.call(field, text);
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+    field.dispatchEvent(new Event('change', { bubbles: true }));
+  }
 }
 function setTildaValue(field, value) {
   if (field.value === value) return;
@@ -272,7 +289,20 @@ function formatLeadMessage(data) {
 function submitLead(formData, sourceForm) {
   if (activeTildaSubmission) return;
   if (!sourceForm?.matches('.prototype-form') || !sourceForm.reportValidity()) return;
+  // FormData построен обработчиком именно из event.currentTarget, а не первой формы страницы.
   const data = Object.fromEntries(formData.entries());
+  const namePresent = Boolean(String(data.name || '').trim());
+  const phonePresent = Boolean(String(data.phone || '').trim());
+  const sources = ['calculator_glazing', 'calculator_finishing', 'final_cta'];
+  bridgeDebug('REMOK lead: name present = ' + namePresent);
+  bridgeDebug('REMOK lead: phone present = ' + phonePresent);
+  bridgeDebug('REMOK lead: form_source = ' + (sources.includes(data.form_source) ? data.form_source : 'unknown'));
+  bridgeDebug('REMOK lead: calculation present = ' + Boolean(data.calculator_type && data.calculator_result));
+  if (!namePresent || !phonePresent) {
+    bridgeDebug('aborted: REMOK source ' + (!namePresent ? 'name' : 'phone') + ' missing');
+    showLeadStatus(sourceForm, bridgeErrorText);
+    return;
+  }
   if (sourceForm === calculator && !data.calculator_type) return;
   const target = findTildaTarget();
   if (!target) {
@@ -286,12 +316,26 @@ function submitLead(formData, sourceForm) {
   bridgeDebug('calculator_result found');
 
   try {
-    setTildaValue(target.name, data.name || '');
-    setTildaValue(target.phone, data.phone);
+    setTildaLeadInput(target.name, data.name);
+    setTildaLeadInput(target.phone, data.phone);
     setTildaValue(target.result, formatLeadMessage(data));
     bridgeDebug('fields populated');
   } catch {
     console.warn('Tilda bridge: field preparation failed; submission stopped');
+    showLeadStatus(sourceForm, bridgeErrorText);
+    return;
+  }
+  const namePopulated = Boolean(target.name.value.trim());
+  const phonePopulated = Boolean(target.phone.value.trim());
+  const resultPopulated = Boolean(target.result.value.trim());
+  bridgeDebug('Tilda Name populated = ' + namePopulated);
+  bridgeDebug('Tilda phone populated = ' + phonePopulated);
+  if (!namePopulated || !phonePopulated || !resultPopulated ||
+      target.name.value !== String(data.name) || target.phone.value !== String(data.phone)) {
+    const stage = !namePopulated ? 'Tilda Name not populated' :
+      !phonePopulated ? 'Tilda phone not populated' :
+      !resultPopulated ? 'Tilda calculator_result not populated' : 'Tilda field value changed';
+    bridgeDebug('aborted: ' + stage);
     showLeadStatus(sourceForm, bridgeErrorText);
     return;
   }
@@ -517,7 +561,8 @@ document.querySelectorAll('.prototype-form').forEach(form => {
     if (!form.reportValidity()) return;
     if (form === calculator && !currentCalculation) return;
     syncLeadFields();
-    submitLead(new FormData(form), form);
+    const sourceForm = event.currentTarget;
+    submitLead(new FormData(sourceForm), sourceForm);
   });
 });
 
